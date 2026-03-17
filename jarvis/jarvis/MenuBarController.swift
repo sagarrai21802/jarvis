@@ -28,6 +28,20 @@ struct MenuBarController: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
+            HStack(spacing: 8) {
+                Button("Voice Test") {
+                    appState.playVoiceSanityCheck()
+                }
+
+                Button("Gemini Text Test") {
+                    appState.testGeminiTextRequest()
+                }
+            }
+
+            Button("Request Microphone Access") {
+                appState.requestMicrophoneAccess()
+            }
+
             Divider()
 
             HStack(spacing: 8) {

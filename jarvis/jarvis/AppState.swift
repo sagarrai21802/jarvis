@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import AVFoundation
 
 @MainActor
 final class AppState: ObservableObject {
@@ -27,6 +28,7 @@ final class AppState: ObservableObject {
 
     let hotkeyManager = HotkeyManager()
     let audioCaptureService = AudioCaptureService()
+    let audioPlaybackService = AudioPlaybackService()
     let geminiLiveService = GeminiLiveService()
     let whisperService = WhisperService()
     let textInjectionService = TextInjectionService()
@@ -95,17 +97,56 @@ final class AppState: ObservableObject {
         }
     }
 
+    func requestMicrophoneAccess() {
+        Task {
+            let status = AVCaptureDevice.authorizationStatus(for: .audio)
+            print("[Jarvis] Current mic permission status: \(status.rawValue)")
+            
+            if status == .authorized {
+                settingsMessage = "Microphone permission already granted."
+                statusText = "Microphone ready"
+                return
+            }
+            
+            if status == .notDetermined {
+                print("[Jarvis] Requesting microphone permission...")
+                let allowed = await AVCaptureDevice.requestAccess(for: .audio)
+                print("[Jarvis] Permission result: \(allowed)")
+                
+                if allowed {
+                    settingsMessage = "Microphone permission granted. Relaunch app to take effect."
+                    statusText = "Microphone granted"
+                } else {
+                    settingsMessage = "Permission request was denied."
+                    statusText = "Permission denied"
+                }
+            } else if status == .denied || status == .restricted {
+                settingsMessage = "Microphone is denied/restricted. Reset in: tccutil reset Microphone com.sagarrai.jarvis"
+                statusText = "Permission blocked"
+            }
+        }
+    }
+
     func startTalkCapture() {
         guard !isTalkCaptureActive, !isDictationCaptureActive else { return }
 
-        do {
-            try audioCaptureService.startCapture()
-            isTalkCaptureActive = true
-            mode = .listening
-            statusText = "Listening for Gemini"
-        } catch {
-            mode = .error
-            statusText = "Mic error: \(error.localizedDescription)"
+        Task {
+            let isAllowed = await audioCaptureService.ensureMicrophonePermission()
+            guard isAllowed else {
+                mode = .error
+                statusText = "Microphone permission not granted"
+                return
+            }
+
+            do {
+                try audioCaptureService.startCapture()
+                isTalkCaptureActive = true
+                mode = .listening
+                statusText = "Listening for Gemini"
+            } catch {
+                mode = .error
+                statusText = "Mic error: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -115,23 +156,27 @@ final class AppState: ObservableObject {
 
         let capturedAudio = audioCaptureService.stopCapture()
         mode = .processing
-        statusText = "Sending to Gemini Live"
+        statusText = "Generating Gemini reply"
 
         Task {
             do {
-                try await geminiLiveService.connectIfNeeded()
-                try await geminiLiveService.sendAudioChunk(capturedAudio)
+                let replyText = try await geminiLiveService.generateTalkReplyText(fromWavData: capturedAudio.wavData)
+                guard !replyText.isEmpty else {
+                    mode = .idle
+                    statusText = "Gemini returned empty reply"
+                    return
+                }
+
+                statusText = "Synthesizing voice reply"
+                let ttsWavData = try await geminiLiveService.synthesizeSpeechWAV(fromText: replyText)
+
+                statusText = "Playing Gemini voice"
+                try audioPlaybackService.playWAVData(ttsWavData)
                 mode = .speaking
-                statusText = "Gemini response incoming"
+                statusText = "Gemini replied"
             } catch {
                 mode = .error
                 statusText = "Gemini error: \(error.localizedDescription)"
-            }
-
-            // Keep UX clear while backend streaming hooks are being added.
-            if mode != .error {
-                mode = .idle
-                statusText = "Ready"
             }
         }
     }
@@ -139,14 +184,47 @@ final class AppState: ObservableObject {
     func startDictationCapture() {
         guard !isTalkCaptureActive, !isDictationCaptureActive else { return }
 
-        do {
-            try audioCaptureService.startCapture()
-            isDictationCaptureActive = true
-            mode = .dictating
-            statusText = "Listening for dictation"
-        } catch {
-            mode = .error
-            statusText = "Mic error: \(error.localizedDescription)"
+        Task {
+            let isAllowed = await audioCaptureService.ensureMicrophonePermission()
+            guard isAllowed else {
+                mode = .error
+                statusText = "Microphone permission not granted"
+                return
+            }
+
+            do {
+                try audioCaptureService.startCapture()
+                isDictationCaptureActive = true
+                mode = .dictating
+                statusText = "Listening for dictation"
+            } catch {
+                mode = .error
+                statusText = "Mic error: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func playVoiceSanityCheck() {
+        let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKey.isEmpty else {
+            settingsMessage = "Add API key before voice test."
+            return
+        }
+
+        geminiLiveService.configure(apiKey: trimmedKey)
+        mode = .processing
+        statusText = "Running voice sanity check"
+
+        Task {
+            do {
+                let wav = try await geminiLiveService.synthesizeSpeechWAV(fromText: "Jarvis voice check complete.")
+                try audioPlaybackService.playWAVData(wav)
+                mode = .speaking
+                statusText = "Voice test played"
+            } catch {
+                mode = .error
+                statusText = "Voice test failed: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -161,7 +239,7 @@ final class AppState: ObservableObject {
         Task {
             do {
                 try await whisperService.prepareModelIfNeeded()
-                let text = try await whisperService.transcribe(audioData: capturedAudio)
+                let text = try await whisperService.transcribe(audioData: capturedAudio.pcm16Mono16k)
 
                 if !text.isEmpty {
                     try textInjectionService.typeText(text)

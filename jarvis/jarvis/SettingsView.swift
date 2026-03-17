@@ -36,10 +36,17 @@ struct SettingsView: View {
             Section("Permissions") {
                 Text("Microphone and Accessibility permissions are required.")
                     .foregroundStyle(.secondary)
+
+                Button("Request Microphone Access") {
+                    appState.requestMicrophoneAccess()
+                }
             }
         }
         .formStyle(.grouped)
         .padding(16)
         .frame(width: 520)
+        .onChange(of: appState.apiKey) { _, _ in
+            appState.settingsMessage = ""
+        }
     }
 }
