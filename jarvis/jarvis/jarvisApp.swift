@@ -9,9 +9,18 @@ import SwiftUI
 
 @main
 struct jarvisApp: App {
+    @StateObject private var appState = AppState()
+
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        MenuBarExtra("Jarvis", systemImage: "waveform.circle.fill") {
+            MenuBarController()
+                .environmentObject(appState)
+        }
+        .menuBarExtraStyle(.window)
+
+        Settings {
+            SettingsView()
+                .environmentObject(appState)
         }
     }
 }
