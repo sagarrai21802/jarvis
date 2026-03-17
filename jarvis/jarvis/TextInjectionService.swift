@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import Foundation
 
@@ -7,7 +8,19 @@ final class TextInjectionService {
         case eventCreationFailed
     }
 
+    private var lastPromptTime: Date?
+    private let promptCooldown: TimeInterval = 30
+
+    func hasAccessibilityPermission() -> Bool {
+        AXIsProcessTrusted()
+    }
+
     func requestAccessibilityPermissionPrompt() {
+        if let lastPromptTime, Date().timeIntervalSince(lastPromptTime) < promptCooldown {
+            return
+        }
+
+        self.lastPromptTime = Date()
         let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
     }
@@ -15,23 +28,22 @@ final class TextInjectionService {
     func typeText(_ text: String) throws {
         guard !text.isEmpty else { return }
 
-        guard AXIsProcessTrusted() else {
+        guard hasAccessibilityPermission() else {
             throw TextInjectionError.accessibilityPermissionMissing
         }
 
-        for scalar in text.unicodeScalars {
-            var value = UInt16(scalar.value)
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
 
-            guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
-                  let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else {
-                throw TextInjectionError.eventCreationFailed
-            }
-
-            keyDown.keyboardSetUnicodeString(stringLength: 1, unicodeString: &value)
-            keyUp.keyboardSetUnicodeString(stringLength: 1, unicodeString: &value)
-
-            keyDown.post(tap: .cghidEventTap)
-            keyUp.post(tap: .cghidEventTap)
+        guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: false) else {
+            throw TextInjectionError.eventCreationFailed
         }
+
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
     }
 }

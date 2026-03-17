@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import Combine
 import AVFoundation
+import AppKit
 
 @MainActor
 final class AppState: ObservableObject {
@@ -100,7 +101,7 @@ final class AppState: ObservableObject {
     func requestMicrophoneAccess() {
         Task {
             let status = AVCaptureDevice.authorizationStatus(for: .audio)
-            print("[Jarvis] Current mic permission status: \(status.rawValue)")
+            print("[Jarvis] Current mic permission status: \(status.rawValue) (\(describeMicStatus(status)))")
             
             if status == .authorized {
                 settingsMessage = "Microphone permission already granted."
@@ -121,9 +122,33 @@ final class AppState: ObservableObject {
                     statusText = "Permission denied"
                 }
             } else if status == .denied || status == .restricted {
-                settingsMessage = "Microphone is denied/restricted. Reset in: tccutil reset Microphone com.sagarrai.jarvis"
+                settingsMessage = "Microphone access is blocked in System Settings. Enable Jarvis under Privacy & Security > Microphone."
                 statusText = "Permission blocked"
+                openMicrophonePrivacySettings()
             }
+        }
+    }
+
+    private func openMicrophonePrivacySettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") else {
+            return
+        }
+
+        NSWorkspace.shared.open(url)
+    }
+
+    private func describeMicStatus(_ status: AVAuthorizationStatus) -> String {
+        switch status {
+        case .notDetermined:
+            return "notDetermined"
+        case .restricted:
+            return "restricted"
+        case .denied:
+            return "denied"
+        case .authorized:
+            return "authorized"
+        @unknown default:
+            return "unknown"
         }
     }
 
@@ -168,12 +193,18 @@ final class AppState: ObservableObject {
                 }
 
                 statusText = "Synthesizing voice reply"
-                let ttsWavData = try await geminiLiveService.synthesizeSpeechWAV(fromText: replyText)
+                do {
+                    let ttsWavData = try await geminiLiveService.synthesizeSpeechWAV(fromText: replyText)
 
-                statusText = "Playing Gemini voice"
-                try audioPlaybackService.playWAVData(ttsWavData)
-                mode = .speaking
-                statusText = "Gemini replied"
+                    statusText = "Playing Gemini voice"
+                    try audioPlaybackService.playWAVData(ttsWavData)
+                    mode = .speaking
+                    statusText = "Gemini replied"
+                } catch {
+                    mode = .idle
+                    statusText = "Reply ready (voice rate-limited)"
+                    settingsMessage = "Gemini reply: \(replyText)"
+                }
             } catch {
                 mode = .error
                 statusText = "Gemini error: \(error.localizedDescription)"
@@ -234,12 +265,11 @@ final class AppState: ObservableObject {
 
         let capturedAudio = audioCaptureService.stopCapture()
         mode = .processing
-        statusText = "Transcribing locally"
+        statusText = "Transcribing with Gemini"
 
         Task {
             do {
-                try await whisperService.prepareModelIfNeeded()
-                let text = try await whisperService.transcribe(audioData: capturedAudio.pcm16Mono16k)
+                let text = try await geminiLiveService.generateTranscriptText(fromWavData: capturedAudio.wavData)
 
                 if !text.isEmpty {
                     try textInjectionService.typeText(text)
@@ -250,6 +280,10 @@ final class AppState: ObservableObject {
             } catch {
                 if case TextInjectionService.TextInjectionError.accessibilityPermissionMissing = error {
                     textInjectionService.requestAccessibilityPermissionPrompt()
+                    settingsMessage = "Accessibility permission is required to paste text. If already enabled, fully quit Jarvis and relaunch from Xcode once."
+                    statusText = "Accessibility permission required"
+                    mode = .error
+                    return
                 }
                 mode = .error
                 statusText = "Dictation error: \(error.localizedDescription)"

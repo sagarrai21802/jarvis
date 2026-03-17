@@ -6,7 +6,17 @@ final class GeminiLiveService {
         case invalidWebSocketURL
         case requestBuildFailed
         case invalidResponse
-        case httpError(Int)
+        case httpError(Int, String?)
+    }
+
+    private struct APIErrorEnvelope: Decodable {
+        let error: APIError
+
+        struct APIError: Decodable {
+            let code: Int?
+            let message: String?
+            let status: String?
+        }
     }
 
     private struct ValidationResponse: Decodable {
@@ -121,7 +131,7 @@ final class GeminiLiveService {
         }
 
         guard (200..<300).contains(httpResponse.statusCode) else {
-            throw GeminiLiveError.httpError(httpResponse.statusCode)
+            throw GeminiLiveError.httpError(httpResponse.statusCode, decodeAPIErrorMessage(from: data))
         }
 
         _ = try JSONDecoder().decode(ValidationResponse.self, from: data)
@@ -157,7 +167,7 @@ final class GeminiLiveService {
         }
 
         guard (200..<300).contains(httpResponse.statusCode) else {
-            throw GeminiLiveError.httpError(httpResponse.statusCode)
+            throw GeminiLiveError.httpError(httpResponse.statusCode, decodeAPIErrorMessage(from: data))
         }
 
         let decoded = try JSONDecoder().decode(GenerateContentResponse.self, from: data)
@@ -182,7 +192,7 @@ final class GeminiLiveService {
             "contents": [
                 [
                     "parts": [
-                        ["text": "You are Jarvis voice assistant. Listen to this user audio and reply conversationally in 1-3 concise sentences."],
+                        ["text": "You are Jarvis voice assistant. Detect the user's spoken language from this audio and respond accordingly: if mostly Hindi, reply in natural Hinglish (Roman script); if mostly English, reply in English. Keep the reply concise (1-2 short sentences), helpful, and conversational."],
                         [
                             "inline_data": [
                                 "mime_type": "audio/wav",
@@ -191,6 +201,10 @@ final class GeminiLiveService {
                         ]
                     ]
                 ]
+            ],
+            "generationConfig": [
+                "temperature": 0.2,
+                "maxOutputTokens": 90
             ]
         ]
 
@@ -202,7 +216,56 @@ final class GeminiLiveService {
         }
 
         guard (200..<300).contains(httpResponse.statusCode) else {
-            throw GeminiLiveError.httpError(httpResponse.statusCode)
+            throw GeminiLiveError.httpError(httpResponse.statusCode, decodeAPIErrorMessage(from: data))
+        }
+
+        let decoded = try JSONDecoder().decode(GenerateContentResponse.self, from: data)
+        let firstText = decoded.candidates?.first?.content?.parts?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return firstText ?? ""
+    }
+
+    func generateTranscriptText(fromWavData wavData: Data) async throws -> String {
+        guard !apiKey.isEmpty else {
+            throw GeminiLiveError.missingAPIKey
+        }
+
+        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=\(apiKey)") else {
+            throw GeminiLiveError.requestBuildFailed
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let payload: [String: Any] = [
+            "contents": [
+                [
+                    "parts": [
+                        ["text": "Transcribe exactly what the speaker says from this audio. Return only the final cleaned transcript text. Keep language faithful to speech. If speech is mostly Hindi, output natural Hinglish (Roman script). If speech is English, output English. Do not add labels, notes, markdown, or extra commentary."],
+                        [
+                            "inline_data": [
+                                "mime_type": "audio/wav",
+                                "data": wavData.base64EncodedString()
+                            ]
+                        ]
+                    ]
+                ]
+            ],
+            "generationConfig": [
+                "temperature": 0.0,
+                "maxOutputTokens": 220
+            ]
+        ]
+
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GeminiLiveError.invalidResponse
+        }
+
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw GeminiLiveError.httpError(httpResponse.statusCode, decodeAPIErrorMessage(from: data))
         }
 
         let decoded = try JSONDecoder().decode(GenerateContentResponse.self, from: data)
@@ -251,7 +314,7 @@ final class GeminiLiveService {
         }
 
         guard (200..<300).contains(httpResponse.statusCode) else {
-            throw GeminiLiveError.httpError(httpResponse.statusCode)
+            throw GeminiLiveError.httpError(httpResponse.statusCode, decodeAPIErrorMessage(from: data))
         }
 
         let decoded = try JSONDecoder().decode(TTSResponse.self, from: data)
@@ -331,6 +394,18 @@ final class GeminiLiveService {
             }
         }
     }
+
+    private func decodeAPIErrorMessage(from data: Data) -> String? {
+        guard let parsed = try? JSONDecoder().decode(APIErrorEnvelope.self, from: data) else {
+            return nil
+        }
+
+        if let message = parsed.error.message, !message.isEmpty {
+            return message
+        }
+
+        return parsed.error.status
+    }
 }
 
 extension GeminiLiveService.GeminiLiveError: LocalizedError {
@@ -344,7 +419,10 @@ extension GeminiLiveService.GeminiLiveError: LocalizedError {
             return "Gemini request could not be built."
         case .invalidResponse:
             return "Gemini returned an invalid response."
-        case let .httpError(statusCode):
+        case let .httpError(statusCode, detail):
+            if let detail, !detail.isEmpty {
+                return "Gemini HTTP error: \(statusCode). \(detail)"
+            }
             return "Gemini HTTP error: \(statusCode)."
         }
     }
